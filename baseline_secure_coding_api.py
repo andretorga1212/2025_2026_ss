@@ -60,6 +60,23 @@ def find_grade(student_id, course_id):
     return None
 
 
+GRADE_WRITE_ROLES = {"professor", "admin"}
+
+
+def current_user():
+    """Resolve the session to the server-side user record (None if anonymous)."""
+    return USERS.get(flask.session.get("user") or "")
+
+
+def can_update_grade(user, course_id):
+    """Per-record decision: admins any course, professors assigned courses only."""
+    if user.role == "admin":
+        return True
+    if user.role == "professor":
+        return course_id in (user.courses or [])
+    return False
+
+
 # -----------------------------------------------------------------------------
 # REST API Endpoints
 # -----------------------------------------------------------------------------
@@ -127,11 +144,30 @@ def get_grades(student_id):
 
 @app.post("/grades/update")
 def update_grade():
-    data = flask.request.get_json()
+    user = current_user()
+    if user is None:
+        return {"error": "authentication required"}, 401
+    if user.role not in GRADE_WRITE_ROLES:
+        return {"error": "forbidden"}, 403
 
-    student_id = data["student_id"]
-    course_id = data["course_id"]
-    grade = data["grade"]
+    data = flask.request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return {"error": "invalid request body"}, 400
+
+    student_id = data.get("student_id")
+    course_id = data.get("course_id")
+    grade = data.get("grade")
+    if (
+        type(student_id) is not int
+        or not isinstance(course_id, str)
+        or not course_id
+        or type(grade) not in (int, float)
+        or not 0 <= grade <= 20
+    ):
+        return {"error": "invalid grade update"}, 400
+
+    if not can_update_grade(user, course_id):
+        return {"error": "forbidden"}, 403
 
     row = find_grade(student_id, course_id)
     if row is None:
@@ -143,9 +179,28 @@ def update_grade():
 
 @app.get("/files")
 def download_file():
+    # R1/R7: downloads require an authenticated session.
+    if "user" not in flask.session:
+        return {"error": "authentication required"}, 401
+
     raw_path = flask.request.args.get("path", "")
-    target = MATERIALS_DIR / raw_path
-    return flask.send_file(target)
+    if not raw_path:
+        return {"error": "missing path"}, 400
+
+    try:
+        base = MATERIALS_DIR.resolve()
+        target = (base / raw_path).resolve()
+        allowed = target.is_relative_to(base) and target.is_file()
+    except (OSError, ValueError):  # e.g. embedded NUL byte, over-long name
+        allowed = False
+
+    if not allowed:
+        return {"error": "file not found"}, 404
+
+    try:
+        return flask.send_file(target)
+    except OSError:  # removed or unreadable between the check and the open
+        return {"error": "file not found"}, 404
 
 @app.errorhandler(Exception)
 def handle_error(exc):
